@@ -227,3 +227,16 @@ async def test_tool_step_nonzero_exit_fails():
         res = await _execute_tool_step(step, _ctx())
     assert res.status == "failed"
     assert "boom" in res.error
+
+
+def test_parse_chat_json_payload_handles_fenced_and_invalid():
+    from sandcastle.engine.generator import _parse_chat_json_payload
+
+    fenced = """```json
+{"mode": "yaml", "message": "ok", "yaml": "name: t\\nsteps: []\\n"}
+```"""
+    parsed = _parse_chat_json_payload(fenced)
+    assert parsed is not None
+    assert parsed["mode"] == "yaml"
+    assert "name: t" in parsed["yaml"]
+    assert _parse_chat_json_payload("sorry, I cannot") is None

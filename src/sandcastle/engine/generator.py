@@ -1076,11 +1076,11 @@ _TIMEOUT = 60
 def _resolve_provider_name() -> str:
     """Return the current advisor provider name (e.g. 'anthropic', 'mistral').
 
-    SANDCASTLE_ADVISOR_PROVIDER always wins. Without it, prefer a provider that
-    is actually usable instead of hardcoding Anthropic: first a cloud provider
-    with a configured key, then the local provider the user picked as
-    workflow_default_model, then a reachable local NIM or Ollama. A box running
-    only local models (e.g. a DGX Spark) can generate workflows out of the box.
+    SANDCASTLE_ADVISOR_PROVIDER always wins. Without it:
+      1) workflow_default_model when it names nim/ or ollama/ (operator intent)
+      2) a cloud provider with a configured key
+      3) reachable local NIM on Spark
+      4) historical anthropic default (callers surface NO_PROVIDER if unusable)
     """
     import os
 
@@ -1088,20 +1088,10 @@ def _resolve_provider_name() -> str:
     if provider in _PROVIDER_CONFIGS:
         return provider
 
-    # 1) Cloud providers with a configured key, historical default first. The
-    #    isinstance check keeps MagicMock auto-attributes (test doubles) from
-    #    counting as configured keys.
-    for name in ("anthropic", "mistral", "openai", "minimax", "google"):
-        cfg = _PROVIDER_CONFIGS.get(name, {})
-        key_env = cfg.get("api_key_env", "")
-        if key_env:
-            key = _resolve_api_key_for_provider(name)
-            if isinstance(key, str) and key:
-                return name
-
-    # 2) The user's chosen default model, when it names a local provider.
-    #    Strict type checks: settings may be a test double whose auto-attributes
-    #    are truthy non-strings, and this path must stay deterministic.
+    # 1) Operator-selected default model. When the box is pointed at a NIM/Garza
+    #    or Ollama default, advisor/Edit-with-AI must follow that choice instead of
+    #    silently preferring an unrelated cloud key (e.g. Mistral) that happens
+    #    to be present in settings.
     from sandcastle.config import settings as _s
 
     wdm = getattr(_s, "workflow_default_model", "")
@@ -1110,10 +1100,27 @@ def _resolve_provider_name() -> str:
             return "nim"
         if wdm == "ollama" or wdm.startswith("ollama/"):
             return "ollama"
+        if wdm.startswith("google/"):
+            return "google"
+        if wdm.startswith("openai/"):
+            return "openai"
+        if wdm.startswith("mistral/"):
+            return "mistral"
+        if wdm.startswith("minimax/"):
+            return "minimax"
+        if wdm in ("sonnet", "haiku", "opus"):
+            return "anthropic"
 
-    # 3) On a Spark, a reachable local NIM/vLLM serves as the generator. The probe
-    #    is Spark-gated so off-Spark resolution stays deterministic (no network
-    #    calls in the default path, no cache-dependent test behavior).
+    # 2) Cloud providers with a configured key, historical default first.
+    for name in ("anthropic", "mistral", "openai", "minimax", "google"):
+        cfg = _PROVIDER_CONFIGS.get(name, {})
+        key_env = cfg.get("api_key_env", "")
+        if key_env:
+            key = _resolve_api_key_for_provider(name)
+            if isinstance(key, str) and key:
+                return name
+
+    # 3) On a Spark, a reachable local NIM/vLLM serves as the generator.
     if getattr(_s, "spark_mode", False) is True:
         from sandcastle.engine.providers import is_nim_reachable
 
@@ -1486,6 +1493,50 @@ def _strip_fencing(text: str) -> str:
     return text
 
 
+def _parse_chat_json_payload(raw_text: str) -> dict | None:
+    """Best-effort parse of advisor chat JSON.
+
+    Models frequently wrap the required object in `````json`` fences or add
+    trailing prose. A failed secondary parse must not raise - callers treat
+    ``None`` as "return the raw text as a questions-mode message".
+    """
+    import json as _json
+
+    text = (raw_text or "").strip()
+    if not text:
+        return None
+
+    # ```json ... ``` or ``` ... ```
+    fenced = re.match(r"^```(?:json)?\s*\n(.*?)```\s*$", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    else:
+        # Leading fence without a clean trailing close - drop the first line
+        if text.lower().startswith("```"):
+            parts = text.split("\n", 1)
+            text = parts[1] if len(parts) > 1 else text
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3].rstrip()
+
+    try:
+        data = _json.loads(text)
+        return data if isinstance(data, dict) else None
+    except _json.JSONDecodeError:
+        pass
+
+    # Decode the first JSON object starting at the first '{'
+    start = text.find("{")
+    if start >= 0:
+        try:
+            data, _end = _json.JSONDecoder().raw_decode(text[start:])
+            if isinstance(data, dict):
+                return data
+        except _json.JSONDecodeError:
+            pass
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Generate-validate-fix loop
 # ---------------------------------------------------------------------------
@@ -1739,8 +1790,6 @@ async def generate_chat(
         Dict with: mode, message, yaml_content?, name?, steps_count?,
         validation_errors?, input_schema?
     """
-    import json
-
     api_key = _resolve_api_key()
     if not api_key:
         raise ValueError(
@@ -1793,16 +1842,11 @@ async def generate_chat(
         purpose="chat",
     )
 
-    # Parse JSON response
-    try:
-        parsed = json.loads(raw_text)
-    except json.JSONDecodeError:
-        # Try to extract JSON from the response
-        json_match = re.search(r"\{[\s\S]*\}", raw_text)
-        if json_match:
-            parsed = json.loads(json_match.group())
-        else:
-            return {"mode": "questions", "message": raw_text}
+    # Parse JSON response. Models often wrap JSON in ```json fences or add prose;
+    # never let a secondary JSONDecodeError bubble as a 502 "Chat generation failed".
+    parsed = _parse_chat_json_payload(raw_text)
+    if not parsed:
+        return {"mode": "questions", "message": raw_text}
 
     mode = parsed.get("mode", "questions")
     message = parsed.get("message", "")
@@ -1832,7 +1876,7 @@ async def generate_chat(
         return result
 
     # mode == "questions" or unknown
-    return {"mode": "questions", "message": message}
+    return {"mode": "questions", "message": message or raw_text}
 
 
 # ---------------------------------------------------------------------------
