@@ -1,0 +1,147 @@
+name: check-lark-email
+description: >
+  List recent Lark mailbox messages since last_check_epoch and summarize new ones.
+  Fails closed if mailbox id or API token are missing.
+default_model: sonnet
+default_timeout: 180
+
+input_schema:
+  required:
+    - lark_mailbox_id
+    - lark_api_token
+  properties:
+    lark_mailbox_id:
+      type: string
+      description: Lark mailbox ID (not a template placeholder)
+      example: "user@company.com"
+    lark_api_token:
+      type: string
+      description: Lark Open API bearer token (tenant or user access token)
+    last_check_epoch:
+      type: integer
+      description: Unix epoch seconds of last successful check; messages at or before this are ignored
+      default: 0
+
+steps:
+  # Deterministic API call — templates resolve before the request is sent.
+  # Empty/missing required inputs are rejected by input_schema before run starts.
+  - id: list-messages
+    type: http
+    http_config:
+      method: GET
+      url: "https://open.larksuite.com/open-apis/mail/v1/user_mailboxes/{input.lark_mailbox_id}/messages?page_size=20"
+      auth: "bearer:{input.lark_api_token}"
+      headers:
+        Content-Type: "application/json"
+        Accept: "application/json"
+      fail_on_error: true
+    retry:
+      max_attempts: 2
+      backoff: exponential
+
+  - id: filter-new
+    type: code
+    depends_on: [list-messages]
+    code_config:
+      language: python
+      code: |
+        import json
+        from datetime import datetime, timezone
+
+        raw = steps.get("list-messages", {})
+        # http step output shape: usually {status_code, body, headers, ...}
+        body = raw.get("body", raw.get("output", raw))
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except Exception:
+                body = {"raw": body}
+
+        last_check = int(input.get("last_check_epoch") or 0)
+        items = []
+        if isinstance(body, dict):
+            data = body.get("data") or body
+            # Common Lark list envelopes
+            for key in ("items", "messages", "message_list", "threads"):
+                if isinstance(data.get(key), list):
+                    items = data[key]
+                    break
+            if not items and isinstance(data.get("items"), dict):
+                items = list(data["items"].values()) if data.get("items") else []
+
+        def _epoch(msg):
+            for k in ("internal_date", "creation_time", "create_time", "received_at", "timestamp"):
+                v = msg.get(k)
+                if v is None and isinstance(msg.get("message"), dict):
+                    v = msg["message"].get(k)
+                if v is None:
+                    continue
+                try:
+                    n = int(v)
+                    # ms → s
+                    if n > 10_000_000_000:
+                        n //= 1000
+                    return n
+                except Exception:
+                    continue
+            return 0
+
+        def _field(msg, *keys, default=""):
+            cur = msg
+            for k in keys:
+                if isinstance(cur, dict) and k in cur:
+                    cur = cur[k]
+                else:
+                    return default
+            return cur if cur is not None else default
+
+        new_msgs = []
+        max_ts = last_check
+        for msg in items if isinstance(items, list) else []:
+            if not isinstance(msg, dict):
+                continue
+            ts = _epoch(msg)
+            if ts <= last_check:
+                continue
+            max_ts = max(max_ts, ts)
+            sender = _field(msg, "from") or _field(msg, "sender") or {}
+            if isinstance(sender, dict):
+                sender_s = f"{sender.get('name') or sender.get('display_name') or ''} <{sender.get('mail_address') or sender.get('email') or ''}>".strip()
+            else:
+                sender_s = str(sender)
+            new_msgs.append({
+                "thread_id": _field(msg, "thread_id") or _field(msg, "id"),
+                "subject": _field(msg, "subject") or _field(msg, "message", "subject"),
+                "sender": sender_s,
+                "received_at": ts,
+                "received_at_iso": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else "",
+                "snippet": str(_field(msg, "snippet") or _field(msg, "body_preview") or "")[:200],
+            })
+
+        result = {
+            "last_check_epoch": last_check,
+            "new_count": len(new_msgs),
+            "new_last_check_epoch": max_ts if new_msgs else last_check,
+            "messages": new_msgs,
+            "api_code": body.get("code") if isinstance(body, dict) else None,
+            "api_msg": body.get("msg") if isinstance(body, dict) else None,
+            "raw_keys": list(body.keys())[:20] if isinstance(body, dict) else type(body).__name__,
+        }
+        if result["new_count"] == 0:
+            result["summary"] = "No new emails since last check."
+        else:
+            lines = [
+                f"- [{m['received_at_iso']}] {m['subject']} — {m['sender']} — {m['snippet']}"
+                for m in new_msgs
+            ]
+            result["summary"] = "New emails:\n" + "\n".join(lines)
+        print(json.dumps(result))
+
+  - id: report
+    type: llm
+    depends_on: [filter-new]
+    prompt: |
+      Summarize this Lark mailbox check for an operator. Be concise.
+      If there are API errors in the data, call them out clearly.
+      Data:
+      {steps.filter-new.output}
