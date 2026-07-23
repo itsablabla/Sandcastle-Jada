@@ -39,6 +39,52 @@ from sandcastle.engine.subprocess_env import build_minimal_subprocess_env
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_openai_compatible_response(resp: object) -> dict:
+    """Parse a chat-completions response from OpenAI-compatible gateways.
+
+    Some gateways (observed: llm.garza.online) answer non-streaming requests with
+    ``Content-Type: text/event-stream`` and a body that is one JSON object followed
+    by an SSE trailer (``data: [DONE]``). ``Response.json()`` then raises
+    ``Extra data``. Prefer Accept: application/json at the call site; this helper
+    still tolerates the trailer.
+    """
+    import json as _json
+
+    raw = (resp.text or "").strip()
+    if not raw:
+        raise ValueError("Empty chat completion response body")
+    # Strip common non-stream SSE trailer glued onto a JSON object.
+    marker = "data: [DONE]"
+    if marker in raw:
+        # Keep only the JSON prefix (first JSON value).
+        try:
+            data, _end = _json.JSONDecoder().raw_decode(raw)
+            if isinstance(data, dict):
+                return data
+        except _json.JSONDecodeError:
+            pass
+        raw = raw.split(marker, 1)[0].strip()
+    # Full SSE frame(s)
+    if raw.startswith("data:") or raw.startswith("event:"):
+        last = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            last = _json.loads(payload)
+        if isinstance(last, dict):
+            return last
+        raise ValueError("SSE chat completion response had no JSON data frame")
+    data = _json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("Chat completion response JSON must be an object")
+    return data
+
+
 # Pre-compiled regex patterns for template and storage reference resolution.
 _TEMPLATE_RE = re.compile(r"\{((?:input|steps|env)\.[^}]+|run_id|date|memory|context)\}")
 _STORAGE_RE = re.compile(r"\{storage\.([^}]+)\}")
@@ -2935,7 +2981,7 @@ async def _execute_llm_step(
                 cost = _safe_cost(in_tok, out_tok, model_info.input_price_per_m, model_info.output_price_per_m)
         else:
             base_url = resolve_base_url(model_info)
-            headers = {"content-type": "application/json"}
+            headers = {"content-type": "application/json", "Accept": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=step.timeout) as client:
@@ -2953,7 +2999,7 @@ async def _execute_llm_step(
                     },
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _parse_openai_compatible_response(resp)
                 text = data["choices"][0]["message"]["content"]
                 usage = data.get("usage", {})
                 in_tok = usage.get("prompt_tokens", 0)
@@ -3632,7 +3678,7 @@ async def _execute_openclaw_step(
                 headers=headers,
             )
             resp.raise_for_status()
-            data = resp.json()
+            data = _parse_openai_compatible_response(resp)
 
         # Extract response
         choices = data.get("choices", [])
@@ -4976,7 +5022,7 @@ async def _execute_report_step(
                 )
         else:
             base_url = resolve_base_url(model_info)
-            headers = {"content-type": "application/json"}
+            headers = {"content-type": "application/json", "Accept": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=step.timeout) as client:
@@ -4993,7 +5039,7 @@ async def _execute_report_step(
                     },
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _parse_openai_compatible_response(resp)
                 markdown_text = data["choices"][0]["message"]["content"]
                 usage = data.get("usage", {})
                 in_tok = usage.get("prompt_tokens", 0)
@@ -5531,7 +5577,7 @@ async def _execute_classify_step(
                 out_tok = usage.get("output_tokens", 0)
         else:
             base_url = resolve_base_url(model_info)
-            headers = {"content-type": "application/json"}
+            headers = {"content-type": "application/json", "Accept": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=step.timeout) as client:
@@ -5545,7 +5591,7 @@ async def _execute_classify_step(
                     },
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data = _parse_openai_compatible_response(resp)
                 raw_category = data["choices"][0]["message"]["content"].strip().lower()
                 usage = data.get("usage", {})
                 in_tok = usage.get("prompt_tokens", 0)
@@ -6162,7 +6208,7 @@ async def _execute_gate_step(
                         out_tok = usage.get("output_tokens", 0)
                 else:
                     base_url = resolve_base_url(model_info)
-                    headers = {"content-type": "application/json"}
+                    headers = {"content-type": "application/json", "Accept": "application/json"}
                     if api_key:
                         headers["Authorization"] = f"Bearer {api_key}"
                     async with httpx.AsyncClient(timeout=step.timeout) as client:
@@ -6176,7 +6222,7 @@ async def _execute_gate_step(
                             },
                         )
                         resp.raise_for_status()
-                        data = resp.json()
+                        data = _parse_openai_compatible_response(resp)
                         llm_response = data["choices"][0]["message"]["content"].strip().lower()
                         usage = data.get("usage", {})
                         in_tok = usage.get("prompt_tokens", 0)
