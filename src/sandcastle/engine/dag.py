@@ -1078,9 +1078,11 @@ def _parse_tool_config(data: dict | None) -> ToolConfig | None:
     """Parse tool connector step configuration from YAML data."""
     if data is None:
         return None
-    args = data.get("arguments", [])
-    if not isinstance(args, list):
-        args = [args]
+    # Prefer "arguments"; accept legacy/misspelled top-level-style "args" inside tool_config.
+    raw_args = data.get("arguments", data.get("args", []))
+    if not isinstance(raw_args, list):
+        raw_args = [raw_args]
+    args = raw_args
     return ToolConfig(
         tool=data.get("tool", ""),
         function=data.get("function", ""),
@@ -1348,6 +1350,18 @@ def _parse_step(data: dict, defaults: dict) -> StepDefinition:
         raw_deps = [raw_deps] if raw_deps is not None else []
     depends_on = [str(d) for d in raw_deps]
 
+    # Tool steps: allow arguments under tool_config.arguments (canonical) or
+    # tool_config.args, and also a mistaken step-level "args" list used by some
+    # hand-written YAML during bring-up.
+    tool_cfg_data = data.get("tool_config")
+    if isinstance(tool_cfg_data, dict):
+        tool_cfg_data = dict(tool_cfg_data)
+        has_args = bool(tool_cfg_data.get("arguments") or tool_cfg_data.get("args"))
+        if not has_args and isinstance(data.get("args"), list):
+            tool_cfg_data["arguments"] = data.get("args")
+    else:
+        tool_cfg_data = data.get("tool_config")
+
     return StepDefinition(
         id=data["id"],
         prompt=prompt,
@@ -1373,7 +1387,7 @@ def _parse_step(data: dict, defaults: dict) -> StepDefinition:
         llm_config=_parse_llm_config(data.get("llm_config")),
         http_config=_parse_http_config(data.get("http_config")),
         code_config=_parse_code_config(data.get("code_config")),
-        tool_config=_parse_tool_config(data.get("tool_config")),
+        tool_config=_parse_tool_config(tool_cfg_data),
         condition_config=_parse_condition_config(data.get("condition_config")),
         classify_config=_parse_classify_config(data.get("classify_config")),
         loop_config=_parse_loop_config(data.get("loop_config")),

@@ -3014,6 +3014,7 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
         name="mcp-bridge",
         description="MCP Bridge - connect any MCP server as a tool",
         category="ai",
+        credential_env_vars=["TOOL_MCP_SERVER_URL", "TOOL_MCP_AUTH_TOKEN"],
         functions=[
             ToolFunction(
                 name="list_tools",
@@ -3047,7 +3048,6 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
                 },
             ),
         ],
-        credential_env_vars=["TOOL_MCP_SERVER_URL"],
         connector_file="mcp-bridge.mjs",
         icon="mcp",
     ),

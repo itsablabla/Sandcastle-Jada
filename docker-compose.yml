@@ -16,7 +16,12 @@ x-sandcastle-env: &sandcastle-env
     DATA_DIR: /app/data
     WORKFLOWS_DIR: /app/workflows
     LOG_LEVEL: info
-    DASHBOARD_ORIGIN: "http://localhost:8080"
+    DASHBOARD_ORIGIN: "${DASHBOARD_ORIGIN:-http://localhost:8080}"
+    # Optional host Ollama. On Linux Docker the bridge gateway is often http://172.18.0.1:11434
+    OLLAMA_HOST: "${OLLAMA_HOST:-}"
+    # Optional MCP bridge credentials (also restorable from dashboard settings)
+    TOOL_MCP_SERVER_URL: "${TOOL_MCP_SERVER_URL:-}"
+    TOOL_MCP_AUTH_TOKEN: "${TOOL_MCP_AUTH_TOKEN:-}"
 
 services:
   postgres:
@@ -62,7 +67,8 @@ services:
     <<: [*sandcastle-build, *sandcastle-env]
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # Bind loopback by default so the API is not publicly exposed without a reverse proxy
+      - "127.0.0.1:8080:8080"
     depends_on:
       redis:
         condition: service_healthy

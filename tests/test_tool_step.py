@@ -72,6 +72,58 @@ steps:
     assert any("must have tool_config" in e for e in errors)
 
 
+def test_tool_step_accepts_args_alias_inside_tool_config():
+    """tool_config.args is accepted as an alias of tool_config.arguments."""
+    wf = parse_yaml_string(
+        """
+name: t
+steps:
+  - id: call
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      args:
+        - tavily_search
+        - '{"query": "sandcastle"}'
+"""
+    )
+    cfg = wf.steps[0].tool_config
+    assert cfg.tool == "mcp-bridge"
+    assert cfg.function == "call_tool"
+    assert cfg.arguments == ["tavily_search", '{"query": "sandcastle"}']
+    assert validate(wf) == []
+
+
+def test_tool_step_accepts_step_level_args_fallback():
+    """Step-level args are folded into tool_config when arguments are missing."""
+    wf = parse_yaml_string(
+        """
+name: t
+steps:
+  - id: call
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+    args:
+      - tavily_search
+      - '{"query": "sandcastle"}'
+"""
+    )
+    cfg = wf.steps[0].tool_config
+    assert cfg.arguments == ["tavily_search", '{"query": "sandcastle"}']
+    assert validate(wf) == []
+
+
+def test_mcp_bridge_registers_auth_token_credential():
+    from sandcastle.engine.tools.registry import get_tool
+
+    tool = get_tool("mcp-bridge")
+    assert "TOOL_MCP_SERVER_URL" in tool.credential_env_vars
+    assert "TOOL_MCP_AUTH_TOKEN" in tool.credential_env_vars
+
+
 # --- Execution ---
 
 

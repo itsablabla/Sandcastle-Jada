@@ -38,8 +38,11 @@ FROM python:3.12-slim
 
 # DejaVu gives the PDF renderer a Unicode font - without it non-latin-1
 # text (Czech, Polish, ...) degrades to '?' via the Helvetica fallback.
+# Node.js is needed for MCP bridge connectors.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 LABEL maintainer="Tomas Pflanzer @gizmax"
 

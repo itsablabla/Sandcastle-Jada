@@ -2935,13 +2935,13 @@ async def _execute_llm_step(
                 cost = _safe_cost(in_tok, out_tok, model_info.input_price_per_m, model_info.output_price_per_m)
         else:
             base_url = resolve_base_url(model_info)
+            headers = {"content-type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=step.timeout) as client:
                 resp = await client.post(
                     f"{base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "content-type": "application/json",
-                    },
+                    headers=headers,
                     json={
                         "model": model_info.api_model_id,
                         "max_tokens": max_tokens,
@@ -4976,13 +4976,13 @@ async def _execute_report_step(
                 )
         else:
             base_url = resolve_base_url(model_info)
+            headers = {"content-type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=step.timeout) as client:
                 resp = await client.post(
                     f"{base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "content-type": "application/json",
-                    },
+                    headers=headers,
                     json={
                         "model": model_info.api_model_id,
                         "max_tokens": 8192,
@@ -5531,13 +5531,13 @@ async def _execute_classify_step(
                 out_tok = usage.get("output_tokens", 0)
         else:
             base_url = resolve_base_url(model_info)
+            headers = {"content-type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient(timeout=step.timeout) as client:
                 resp = await client.post(
                     f"{base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "content-type": "application/json",
-                    },
+                    headers=headers,
                     json={
                         "model": model_info.api_model_id,
                         "max_tokens": 64,
@@ -6162,13 +6162,13 @@ async def _execute_gate_step(
                         out_tok = usage.get("output_tokens", 0)
                 else:
                     base_url = resolve_base_url(model_info)
+                    headers = {"content-type": "application/json"}
+                    if api_key:
+                        headers["Authorization"] = f"Bearer {api_key}"
                     async with httpx.AsyncClient(timeout=step.timeout) as client:
                         resp = await client.post(
                             f"{base_url}/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {api_key}",
-                                "content-type": "application/json",
-                            },
+                            headers=headers,
                             json={
                                 "model": model_info.api_model_id,
                                 "max_tokens": 256,
