@@ -1,147 +1,127 @@
 name: check-lark-email
 description: >
-  List recent Lark mailbox messages since last_check_epoch and summarize new ones.
-  Fails closed if mailbox id or API token are missing.
+  List recent mailbox messages synced into Twenty CRM (Lark / connected email).
+  Uses the Twenty API bearer (same token as mcpServers.twenty at
+  https://crm.garza.online/mcp). Fails closed when TWENTY_CRM_API_TOKEN is unset.
 default_model: sonnet
 default_timeout: 180
 
 input_schema:
-  required:
-    - lark_mailbox_id
-    - lark_api_token
   properties:
-    lark_mailbox_id:
+    last_check_iso:
       type: string
-      description: Lark mailbox ID (not a template placeholder)
-      example: "user@company.com"
-    lark_api_token:
-      type: string
-      description: Lark Open API bearer token (tenant or user access token)
-    last_check_epoch:
+      description: >
+        ISO-8601 timestamp of last successful check (e.g. 2026-07-20T00:00:00Z).
+        Messages with receivedAt less than or equal to this are ignored. Empty = all.
+      default: ""
+    limit:
       type: integer
-      description: Unix epoch seconds of last successful check; messages at or before this are ignored
-      default: 0
+      description: Max messages to fetch from Twenty (fixed at 50 in URL for now)
+      default: 50
 
 steps:
-  # Deterministic API call — templates resolve before the request is sent.
-  # Empty/missing required inputs are rejected by input_schema before run starts.
+  # Deterministic REST call. Auth is server env TWENTY_CRM_API_TOKEN (Twenty MCP bearer).
+  # Bare env auth raises before the request if the variable is missing.
   - id: list-messages
     type: http
     http_config:
       method: GET
-      url: "https://open.larksuite.com/open-apis/mail/v1/user_mailboxes/{input.lark_mailbox_id}/messages?page_size=20"
-      auth: "bearer:{input.lark_api_token}"
+      url: "https://crm.garza.online/rest/messages?limit=50"
+      auth: TWENTY_CRM_API_TOKEN
       headers:
-        Content-Type: "application/json"
         Accept: "application/json"
       fail_on_error: true
     retry:
       max_attempts: 2
       backoff: exponential
 
+  # Restricted sandbox: no imports. Assign to result only.
   - id: filter-new
     type: code
     depends_on: [list-messages]
     code_config:
       language: python
       code: |
-        import json
-        from datetime import datetime, timezone
+        body = _steps.get("list-messages", {})
+        if not isinstance(body, dict):
+            body = {"raw": body}
 
-        raw = steps.get("list-messages", {})
-        # http step output shape: usually {status_code, body, headers, ...}
-        body = raw.get("body", raw.get("output", raw))
-        if isinstance(body, str):
-            try:
-                body = json.loads(body)
-            except Exception:
-                body = {"raw": body}
+        messages = []
+        data = body.get("data")
+        if isinstance(data, dict):
+            messages = data.get("messages") or data.get("records") or []
+        elif isinstance(data, list):
+            messages = data
+        if not messages and isinstance(body.get("messages"), list):
+            messages = body["messages"]
+        if not isinstance(messages, list):
+            messages = []
 
-        last_check = int(input.get("last_check_epoch") or 0)
-        items = []
-        if isinstance(body, dict):
-            data = body.get("data") or body
-            # Common Lark list envelopes
-            for key in ("items", "messages", "message_list", "threads"):
-                if isinstance(data.get(key), list):
-                    items = data[key]
-                    break
-            if not items and isinstance(data.get("items"), dict):
-                items = list(data["items"].values()) if data.get("items") else []
-
-        def _epoch(msg):
-            for k in ("internal_date", "creation_time", "create_time", "received_at", "timestamp"):
-                v = msg.get(k)
-                if v is None and isinstance(msg.get("message"), dict):
-                    v = msg["message"].get(k)
-                if v is None:
-                    continue
-                try:
-                    n = int(v)
-                    # ms → s
-                    if n > 10_000_000_000:
-                        n //= 1000
-                    return n
-                except Exception:
-                    continue
-            return 0
-
-        def _field(msg, *keys, default=""):
-            cur = msg
-            for k in keys:
-                if isinstance(cur, dict) and k in cur:
-                    cur = cur[k]
-                else:
-                    return default
-            return cur if cur is not None else default
+        last_check = str(_input.get("last_check_iso") or "").strip()
 
         new_msgs = []
-        max_ts = last_check
-        for msg in items if isinstance(items, list) else []:
+        newest = last_check
+        for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            ts = _epoch(msg)
-            if ts <= last_check:
+            received = str(msg.get("receivedAt") or msg.get("createdAt") or "")
+            if last_check and received and received <= last_check:
                 continue
-            max_ts = max(max_ts, ts)
-            sender = _field(msg, "from") or _field(msg, "sender") or {}
-            if isinstance(sender, dict):
-                sender_s = f"{sender.get('name') or sender.get('display_name') or ''} <{sender.get('mail_address') or sender.get('email') or ''}>".strip()
-            else:
-                sender_s = str(sender)
+            if received and (not newest or received > newest):
+                newest = received
+            text = str(msg.get("text") or msg.get("body") or msg.get("snippet") or "")
             new_msgs.append({
-                "thread_id": _field(msg, "thread_id") or _field(msg, "id"),
-                "subject": _field(msg, "subject") or _field(msg, "message", "subject"),
-                "sender": sender_s,
-                "received_at": ts,
-                "received_at_iso": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else "",
-                "snippet": str(_field(msg, "snippet") or _field(msg, "body_preview") or "")[:200],
+                "id": msg.get("id"),
+                "thread_id": msg.get("messageThreadId") or msg.get("message_thread_id"),
+                "subject": msg.get("subject") or "",
+                "received_at_iso": received,
+                "snippet": text[:200],
+                "is_draft": msg.get("isDraft"),
+                "header_message_id": msg.get("headerMessageId"),
             })
 
-        result = {
-            "last_check_epoch": last_check,
-            "new_count": len(new_msgs),
-            "new_last_check_epoch": max_ts if new_msgs else last_check,
-            "messages": new_msgs,
-            "api_code": body.get("code") if isinstance(body, dict) else None,
-            "api_msg": body.get("msg") if isinstance(body, dict) else None,
-            "raw_keys": list(body.keys())[:20] if isinstance(body, dict) else type(body).__name__,
-        }
-        if result["new_count"] == 0:
-            result["summary"] = "No new emails since last check."
+        empty_sync = len(messages) == 0
+        if empty_sync:
+            summary = (
+                "Twenty workspace returned 0 messages. Connect Lark/email in Twenty "
+                "and wait for sync if this stays empty."
+            )
+        elif len(new_msgs) == 0:
+            summary = "No new emails since last check."
         else:
-            lines = [
-                f"- [{m['received_at_iso']}] {m['subject']} — {m['sender']} — {m['snippet']}"
-                for m in new_msgs
-            ]
-            result["summary"] = "New emails:\n" + "\n".join(lines)
-        print(json.dumps(result))
+            lines = []
+            for m in new_msgs:
+                lines.append(
+                    "- [" + str(m.get("received_at_iso") or "") + "] "
+                    + str(m.get("subject") or "") + " — "
+                    + str(m.get("snippet") or "")
+                )
+            summary = "New emails:\n" + "\n".join(lines)
+
+        result = {
+            "source": "twenty-crm",
+            "endpoint": "https://crm.garza.online/rest/messages",
+            "http_status": body.get("status_code"),
+            "last_check_iso": last_check,
+            "fetched_count": len(messages),
+            "new_count": len(new_msgs),
+            "new_last_check_iso": newest if new_msgs else last_check,
+            "messages": new_msgs,
+            "total_count": body.get("totalCount"),
+            "note": (
+                "Twenty workspace returned 0 messages. Connect Lark/email in Twenty "
+                "and wait for sync if this stays empty."
+                if empty_sync
+                else None
+            ),
+            "summary": summary,
+        }
 
   - id: report
     type: llm
     depends_on: [filter-new]
     prompt: |
-      Summarize this Lark mailbox check for an operator. Be concise.
-      If there are API errors in the data, call them out clearly.
+      Summarize this mailbox check for an operator. Be concise.
+      Source is Twenty CRM (Lark/email sync via crm.garza.online). Call out empty inbox vs API errors.
       Data:
       {steps.filter-new.output}
