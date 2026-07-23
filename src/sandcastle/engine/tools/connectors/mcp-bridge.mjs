@@ -34,19 +34,39 @@ function buildHeaders() {
   return headers;
 }
 
-function parseRpcPayload(text) {
+function parseRpcPayload(text, contentType = "") {
   const trimmed = (text || "").trim();
   if (!trimmed) {
     throw new Error("Empty MCP response body");
   }
-  // SSE is framed as lines starting with "data:" (optionally after a BOM/event:).
-  // Do not use a bare substring match — normal JSON bodies can contain "data:" in
-  // field values and must stay on the JSON parse path.
-  const looksLikeSse =
-    trimmed.startsWith("data:") ||
-    trimmed.includes("\ndata:") ||
-    trimmed.includes("\r\ndata:");
-  if (looksLikeSse) {
+
+  const ct = (contentType || "").toLowerCase();
+  const contentTypeIsSse = ct.includes("text/event-stream");
+  // SSE frames are line-oriented (optional "event:" then "data:"). A JSON body
+  // that merely contains the substring "data:" in a string value is NOT SSE.
+  const firstLine = trimmed.split(/\r?\n/, 1)[0] || "";
+  const startsLikeSse =
+    firstLine.startsWith("data:") || firstLine.startsWith("event:");
+
+  const tryJson = () => {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  };
+
+  // Prefer JSON whenever the body is a JSON value, unless the server explicitly
+  // labeled the response as SSE (streamable HTTP often still sends JSON-RPC in
+  // data: lines with content-type text/event-stream).
+  if (!contentTypeIsSse && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
+    const parsed = tryJson();
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  if (contentTypeIsSse || startsLikeSse) {
     const dataLines = trimmed
       .split(/\r?\n/)
       .map((l) => l.trimEnd())
@@ -71,12 +91,13 @@ function parseRpcPayload(text) {
     }
     return last;
   }
-  // Plain JSON body
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    throw new Error(`Invalid JSON from MCP server: ${trimmed.slice(0, 200)}`);
+
+  // Plain JSON body (or last-resort parse)
+  const parsed = tryJson();
+  if (parsed !== null) {
+    return parsed;
   }
+  throw new Error(`Invalid JSON from MCP server: ${trimmed.slice(0, 200)}`);
 }
 
 async function postRaw(body, { notification = false } = {}) {
@@ -120,7 +141,7 @@ async function postRaw(body, { notification = false } = {}) {
   if (!resp.ok) {
     throw new Error(`MCP server ${resp.status}: ${text.slice(0, 500)}`);
   }
-  return parseRpcPayload(text);
+  return parseRpcPayload(text, resp.headers.get("content-type") || "");
 }
 
 async function rpc(method, params = {}) {
