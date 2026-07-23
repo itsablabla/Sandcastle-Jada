@@ -39,10 +39,16 @@ function parseRpcPayload(text) {
   if (!trimmed) {
     throw new Error("Empty MCP response body");
   }
-  // SSE: one or more "data: {...}" lines
-  if (trimmed.includes("data:")) {
+  // SSE is framed as lines starting with "data:" (optionally after a BOM/event:).
+  // Do not use a bare substring match — normal JSON bodies can contain "data:" in
+  // field values and must stay on the JSON parse path.
+  const looksLikeSse =
+    trimmed.startsWith("data:") ||
+    trimmed.includes("\ndata:") ||
+    trimmed.includes("\r\ndata:");
+  if (looksLikeSse) {
     const dataLines = trimmed
-      .split("\n")
+      .split(/\r?\n/)
       .map((l) => l.trimEnd())
       .filter((l) => l.startsWith("data:"))
       .map((l) => l.slice(5).trim())

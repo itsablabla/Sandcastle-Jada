@@ -1356,7 +1356,9 @@ def _parse_step(data: dict, defaults: dict) -> StepDefinition:
     tool_cfg_data = data.get("tool_config")
     if isinstance(tool_cfg_data, dict):
         tool_cfg_data = dict(tool_cfg_data)
-        has_args = bool(tool_cfg_data.get("arguments") or tool_cfg_data.get("args"))
+        # Only fall back to step-level args when the caller omitted both keys.
+        # An explicit empty list (arguments: []) must be preserved.
+        has_args = "arguments" in tool_cfg_data or "args" in tool_cfg_data
         if not has_args and isinstance(data.get("args"), list):
             tool_cfg_data["arguments"] = data.get("args")
     else:

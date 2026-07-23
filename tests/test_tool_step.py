@@ -116,6 +116,26 @@ steps:
     assert validate(wf) == []
 
 
+def test_tool_step_explicit_empty_arguments_not_overwritten_by_step_args():
+    """Explicit tool_config.arguments: [] must not be replaced by step-level args."""
+    wf = parse_yaml_string(
+        """
+name: t
+steps:
+  - id: call
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: list_tools
+      arguments: []
+    args:
+      - should-not-apply
+"""
+    )
+    assert wf.steps[0].tool_config.arguments == []
+    assert validate(wf) == []
+
+
 def test_mcp_bridge_registers_auth_token_credential():
     from sandcastle.engine.tools.registry import get_tool
 
