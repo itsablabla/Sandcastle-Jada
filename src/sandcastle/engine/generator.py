@@ -819,16 +819,43 @@ _PROVIDER_CONFIGS = {
         "headers_fn": lambda _: {"Content-Type": "application/json"},
     },
     "nim": {
-        # Local NIM / vLLM (OpenAI-compatible). Model is resolved at call time
-        # from workflow_default_model / spark_nim_default_model - a vLLM serves
-        # whatever --served-model-name it was started with.
+        # Local NIM / vLLM / OpenAI-compatible gateway (e.g. llm.garza.online).
+        # Model is resolved at call time from workflow_default_model /
+        # spark_nim_default_model. A key is optional for true local NIM and
+        # required for authenticated gateways - headers_fn adds Bearer when set.
         "api_url": "{nim_base_url}/v1/chat/completions",
         "model": "llama-3.1-70b",
-        "api_key_env": "",  # local inference needs no key
+        "api_key_env": "NIM_API_KEY",
         "region": "local",
-        "headers_fn": lambda _: {"Content-Type": "application/json"},
+        "headers_fn": lambda key: _nim_headers(key),
     },
 }
+
+
+def _nim_headers(key: str) -> dict[str, str]:
+    """Build headers for the NIM/OpenAI-compatible advisor endpoint.
+
+    Local NIM often needs no auth; hosted gateways (Garza LLM) require Bearer.
+    Accept application/json so gateways that default to event-stream still
+    return a single JSON object when possible.
+    """
+    import os
+
+    real = key if isinstance(key, str) else ""
+    if real in ("", "no-key-required", "ollama-no-key"):
+        try:
+            from sandcastle.config import settings as _s
+
+            real = os.environ.get("NIM_API_KEY", "") or getattr(_s, "nim_api_key", "") or ""
+        except Exception:
+            real = os.environ.get("NIM_API_KEY", "")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if real and real not in ("no-key-required", "ollama-no-key"):
+        headers["Authorization"] = f"Bearer {real}"
+    return headers
 
 
 def _local_advisor_model(provider: str, cfg: dict) -> str:
@@ -978,6 +1005,44 @@ def _parse_response_text(data: dict, *, is_anthropic: bool | None = None) -> str
     return data["choices"][0]["message"]["content"]
 
 
+def _parse_advisor_http_response(resp: object) -> dict:
+    """Parse advisor HTTP JSON, tolerating SSE trailers from some gateways.
+
+    llm.garza.online (and similar) sometimes return a JSON chat-completion object
+    followed by ``data: [DONE]`` under ``Content-Type: text/event-stream``.
+    """
+    import json as _json
+
+    raw = (getattr(resp, "text", None) or "").strip()
+    if not raw:
+        raise ValueError("Empty advisor response body")
+    marker = "data: [DONE]"
+    if marker in raw:
+        try:
+            data, _end = _json.JSONDecoder().raw_decode(raw)
+            if isinstance(data, dict):
+                return data
+        except _json.JSONDecodeError:
+            raw = raw.split(marker, 1)[0].strip()
+    if raw.startswith("data:") or raw.startswith("event:"):
+        last = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            last = _json.loads(payload)
+        if isinstance(last, dict):
+            return last
+        raise ValueError("SSE advisor response had no JSON data frame")
+    data = _json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("Advisor response JSON must be an object")
+    return data
+
+
 def _get_api_url() -> str:
     """Get API URL from advisor config."""
     return _get_advisor_config().get("api_url", _API_URL)
@@ -1069,7 +1134,7 @@ def _resolve_api_key_for_provider(provider_name: str) -> str:
     cfg = _PROVIDER_CONFIGS.get(provider_name, {})
     key_env = cfg.get("api_key_env", "")
 
-    # Providers that do not need a key (e.g. Ollama)
+    # Providers that do not need a key (e.g. Ollama, oMLX)
     if not key_env:
         return "no-key-required"
 
@@ -1083,10 +1148,16 @@ def _resolve_api_key_for_provider(provider_name: str) -> str:
             "MISTRAL_API_KEY": "mistral_api_key",
             "OPENROUTER_API_KEY": "openrouter_api_key",
             "MINIMAX_API_KEY": "minimax_api_key",
+            "NIM_API_KEY": "nim_api_key",
         }
         attr = attr_map.get(key_env)
         if attr:
             api_key = getattr(settings, attr, "") or ""
+    # NIM is usable keyless on a true local server. When no key is configured,
+    # treat it like Ollama so advisor selection still picks nim/ from
+    # workflow_default_model instead of failing closed.
+    if not api_key and provider_name == "nim":
+        return "no-key-required"
     return api_key
 
 
@@ -1215,7 +1286,10 @@ async def _call_advisor_llm(
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.post(api_url, json=body, headers=headers)
                 resp.raise_for_status()
-                result_text = _parse_response_text(resp.json(), is_anthropic=is_anthropic)
+                result_text = _parse_response_text(
+                    _parse_advisor_http_response(resp),
+                    is_anthropic=is_anthropic,
+                )
 
             # Success - record failover info if we switched providers
             if i > 0:

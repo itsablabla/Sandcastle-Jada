@@ -4003,15 +4003,26 @@ async def generate_workflow(req: Request, request: WorkflowGenerateRequest) -> A
 async def generate_chat(req: Request, request: GenerateChatRequest) -> ApiResponse:
     """Chat-based workflow generation with multi-turn conversation."""
     await execution_limiter.check(req)
+    from sandcastle.engine.generator import _resolve_api_key
     from sandcastle.engine.generator import generate_chat as _generate_chat
 
-    if not settings.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+    # Same provider gate as POST /generate: any configured advisor provider works
+    # (Anthropic, OpenAI, Mistral, OpenRouter, NIM/Garza, Ollama, …).
+    try:
+        _has_provider = bool(_resolve_api_key())
+    except Exception:
+        _has_provider = False
+    if not _has_provider:
         raise HTTPException(
             status_code=400,
             detail=ApiResponse(
                 error=ErrorResponse(
-                    code="MISSING_API_KEY",
-                    message="ANTHROPIC_API_KEY is required for workflow generation",
+                    code="NO_PROVIDER",
+                    message=(
+                        "No AI provider is configured. Add a provider key in "
+                        "Settings → Providers (or run a local model) to generate "
+                        "workflows."
+                    ),
                 )
             ).model_dump(),
         )
@@ -4023,7 +4034,7 @@ async def generate_chat(req: Request, request: GenerateChatRequest) -> ApiRespon
             existing_yaml=request.existing_yaml,
         )
     except httpx.HTTPStatusError as exc:
-        logger.error("Anthropic API error: %s", exc)
+        logger.error("Advisor API error: %s", exc)
         raise HTTPException(
             status_code=502,
             detail=ApiResponse(
