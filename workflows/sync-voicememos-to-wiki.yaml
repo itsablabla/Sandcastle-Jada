@@ -1,0 +1,429 @@
+name: sync-voicememos-to-wiki
+description: >
+  Sync recent Voicenotes (voice memos) into the Outline wiki collection
+  "Voice Memos" via Garza Tools MCP (mcp.garza.online). Uses vn_list_notes /
+  vn_get_note and wiki_create_document. Tracks synced note ids in Garza store
+  memory [sandcastle]/voicememo_wiki_synced. Runs hourly when scheduled.
+default_model: sonnet
+default_timeout: 600
+schedule: "15 * * * *"
+
+input_schema:
+  properties:
+    collection_id:
+      type: string
+      description: Outline collection id for Voice Memos
+      default: "09e3f889-303e-4b02-a872-ff3b8fb09e84"
+
+steps:
+  - id: load-synced
+    type: tool
+    timeout: 180
+    retry:
+      max_attempts: 4
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - store
+        - '{"action":"get_memory","args":{"key":"voicememo_wiki_synced","namespace":"sandcastle"}}'
+
+  - id: list-notes
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - vn_list_notes
+        - '{"page":1,"preview_only":true}'
+    retry:
+      max_attempts: 2
+      backoff: exponential
+
+  - id: pick
+    type: code
+    depends_on: [load-synced, list-notes]
+    code_config:
+      language: python
+      code: |
+        synced = {}
+        load = _steps.get("load-synced") or {}
+        load_text = str(load.get("text") if isinstance(load, dict) else load).strip()
+        parsed_mem = None
+        try:
+            parsed_mem = json.loads(load_text) if load_text else None
+        except:
+            parsed_mem = None
+        if isinstance(parsed_mem, dict):
+            synced = parsed_mem
+        elif isinstance(parsed_mem, str):
+            for part in str(parsed_mem).split(","):
+                part = part.strip().strip('"')
+                if part:
+                    synced[part] = True
+        elif load_text and not load_text.startswith("{"):
+            for part in load_text.split(","):
+                part = part.strip().strip('"')
+                if part and part.lower() not in ("null", "none"):
+                    synced[part] = True
+
+        listed = _steps.get("list-notes") or {}
+        list_text = str(listed.get("text") if isinstance(listed, dict) else listed)
+        payload = None
+        try:
+            payload = json.loads(list_text) if list_text else None
+        except:
+            payload = None
+        notes = []
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list):
+                notes = data
+        elif isinstance(payload, list):
+            notes = payload
+
+        pending = []
+        for n in notes:
+            if not isinstance(n, dict):
+                continue
+            nid = str(n.get("id") or "")
+            if not nid or synced.get(nid):
+                continue
+            pending.append(nid)
+
+        pending = pending[:2]
+        pad = pending + [""] * (5 - len(pending))  # keep 5 slots; trailing empty
+        result = {
+            "synced_count_before": len(synced),
+            "listed_count": len(notes) if isinstance(notes, list) else 0,
+            "pending_count": len(pending),
+            "synced_map": synced,
+            "pending_ids": pending,
+            "id0": pad[0],
+            "id1": pad[1],
+            "id2": pad[2],
+            "id3": pad[3],
+            "id4": pad[4],
+            "collection_id": "09e3f889-303e-4b02-a872-ff3b8fb09e84",
+            "summary": (
+                "No new voicenotes to sync."
+                if not pending
+                else ("Will sync " + str(len(pending)) + " new voicenote(s).")
+            ),
+        }
+
+  - id: get-0
+    type: tool
+    depends_on: [pick]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - vn_get_note
+        - '{"id":"{steps.pick.output.id0}"}'
+
+  - id: get-1
+    type: tool
+    depends_on: [pick]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - vn_get_note
+        - '{"id":"{steps.pick.output.id1}"}'
+
+  - id: get-2
+    type: tool
+    depends_on: [pick]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - vn_get_note
+        - '{"id":"{steps.pick.output.id2}"}'
+
+  - id: get-3
+    type: tool
+    depends_on: [pick]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - vn_get_note
+        - '{"id":"{steps.pick.output.id3}"}'
+
+  - id: get-4
+    type: tool
+    depends_on: [pick]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - vn_get_note
+        - '{"id":"{steps.pick.output.id4}"}'
+
+  - id: build-docs
+    type: code
+    depends_on: [pick, get-0, get-1, get-2, get-3, get-4]
+    code_config:
+      language: python
+      code: |
+        def clean(s):
+            s = str(s or "")
+            # Keep tool-arg JSON safe after template injection (no raw quotes/newlines/braces)
+            s = s.replace("\\", " ").replace('"', "'").replace("{", "(").replace("}", ")")
+            s = s.replace("\r", " ").replace("\n", " | ")
+            while "  " in s:
+                s = s.replace("  ", " ")
+            return s.strip()
+
+        pick = _steps.get("pick") or {}
+        collection_id = str(pick.get("collection_id") or "09e3f889-303e-4b02-a872-ff3b8fb09e84")
+        docs = []
+        for k in ["get-0", "get-1", "get-2", "get-3", "get-4"]:
+            item = _steps.get(k)
+            if item is None:
+                continue
+            text = str(item.get("text") if isinstance(item, dict) else item)
+            if not text or text.strip() in ("", "{}"):
+                continue
+            payload = None
+            try:
+                payload = json.loads(text)
+            except:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            if not isinstance(data, dict):
+                continue
+            nid = str(data.get("id") or "")
+            if not nid:
+                continue
+            title = clean(data.get("title") or "Untitled voice memo")
+            transcript = clean(data.get("transcript") or "(no transcript)")
+            recorded = clean(data.get("recorded_at") or data.get("created_at") or "")
+            tags = data.get("tags") if isinstance(data.get("tags"), list) else []
+            tag_s = clean(", ".join([str(t) for t in tags[:12]]))
+            wiki_title = clean("Voice memo " + nid + " — " + title)
+            if len(wiki_title) > 100:
+                wiki_title = wiki_title[:97] + "..."
+            if len(transcript) > 1800:
+                transcript = transcript[:1800] + " ..."
+            body = clean(
+                "voicenote_id: " + nid
+                + " | recorded_at: " + recorded
+                + " | source: voicenotes"
+                + " | tags: " + tag_s
+                + " | "
+                + transcript
+                + " | _Synced by Sandcastle sync-voicememos-to-wiki._"
+            )
+            docs.append({
+                "id": nid,
+                "wiki_title": wiki_title,
+                "body": body,
+                "collection_id": collection_id,
+            })
+
+        empty = {"id": "", "wiki_title": "skip", "body": "skip", "collection_id": collection_id}
+        while len(docs) < 5:
+            docs.append(dict(empty))
+
+        result = {
+            "count": len([d for d in docs if d.get("id")]),
+            "docs": [d for d in docs if d.get("id")],
+            "collection_id": collection_id,
+            "t0": docs[0]["wiki_title"],
+            "b0": docs[0]["body"],
+            "i0": docs[0]["id"],
+            "t1": docs[1]["wiki_title"],
+            "b1": docs[1]["body"],
+            "i1": docs[1]["id"],
+            "t2": docs[2]["wiki_title"],
+            "b2": docs[2]["body"],
+            "i2": docs[2]["id"],
+            "t3": docs[3]["wiki_title"],
+            "b3": docs[3]["body"],
+            "i3": docs[3]["id"],
+            "t4": docs[4]["wiki_title"],
+            "b4": docs[4]["body"],
+            "i4": docs[4]["id"],
+        }
+
+  - id: create-0
+    type: tool
+    depends_on: [build-docs]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - wiki_create_document
+        - '{"collectionId":"09e3f889-303e-4b02-a872-ff3b8fb09e84","title":"{steps.build-docs.output.t0}","text":"{steps.build-docs.output.b0}","publish":true}'
+
+  - id: create-1
+    type: tool
+    depends_on: [build-docs]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - wiki_create_document
+        - '{"collectionId":"09e3f889-303e-4b02-a872-ff3b8fb09e84","title":"{steps.build-docs.output.t1}","text":"{steps.build-docs.output.b1}","publish":true}'
+
+  - id: create-2
+    type: tool
+    depends_on: [build-docs]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - wiki_create_document
+        - '{"collectionId":"09e3f889-303e-4b02-a872-ff3b8fb09e84","title":"{steps.build-docs.output.t2}","text":"{steps.build-docs.output.b2}","publish":true}'
+
+  - id: create-3
+    type: tool
+    depends_on: [build-docs]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - wiki_create_document
+        - '{"collectionId":"09e3f889-303e-4b02-a872-ff3b8fb09e84","title":"{steps.build-docs.output.t3}","text":"{steps.build-docs.output.b3}","publish":true}'
+
+  - id: create-4
+    type: tool
+    depends_on: [build-docs]
+    timeout: 180
+    retry:
+      max_attempts: 3
+      backoff: exponential
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - wiki_create_document
+        - '{"collectionId":"09e3f889-303e-4b02-a872-ff3b8fb09e84","title":"{steps.build-docs.output.t4}","text":"{steps.build-docs.output.b4}","publish":true}'
+
+  - id: finalize
+    type: code
+    depends_on: [pick, build-docs, create-0, create-1, create-2, create-3, create-4]
+    code_config:
+      language: python
+      code: |
+        pick = _steps.get("pick") or {}
+        build = _steps.get("build-docs") or {}
+        synced = pick.get("synced_map") if isinstance(pick.get("synced_map"), dict) else {}
+        created = []
+        errors = []
+        for idx, step_id in enumerate(["create-0", "create-1", "create-2", "create-3", "create-4"]):
+            nid = str(build.get("i" + str(idx)) or "")
+            title_slot = str(build.get("t" + str(idx)) or "")
+            if not nid:
+                continue
+            raw = _steps.get(step_id)
+            text = str(raw.get("text") if isinstance(raw, dict) else raw)
+            if title_slot == "skip":
+                continue
+            payload = None
+            try:
+                payload = json.loads(text) if text else None
+            except:
+                payload = None
+            doc = None
+            if isinstance(payload, dict):
+                doc = payload.get("document") if isinstance(payload.get("document"), dict) else None
+                if doc is None and payload.get("id"):
+                    doc = payload
+            if isinstance(doc, dict) and doc.get("id"):
+                synced[nid] = True
+                created.append({
+                    "voicenote_id": nid,
+                    "wiki_id": str(doc.get("id") or ""),
+                    "url": str(doc.get("url") or ""),
+                    "title": str(doc.get("title") or ""),
+                })
+            else:
+                err = text[:200] if text else "unknown create failure"
+                errors.append({"voicenote_id": nid, "error": err})
+
+        ids = []
+        for k in synced.keys():
+            ks = "".join([c for c in str(k) if c.isalnum()])
+            if ks:
+                ids.append(ks)
+        mem_csv = ",".join(ids)
+        lines = []
+        for c in created:
+            lines.append("- " + str(c.get("title") or c.get("voicenote_id")) + " -> " + str(c.get("url") or c.get("wiki_id")))
+        summary = "Synced " + str(len(created)) + " voice memo(s) to wiki."
+        if lines:
+            summary = summary + " | " + " | ".join(lines)
+        if errors:
+            summary = summary + " | errors=" + str(len(errors))
+        result = {
+            "created_count": len(created),
+            "error_count": len(errors),
+            "created": created,
+            "errors": errors,
+            "synced_total": len(ids),
+            "mem_csv": mem_csv,
+            "collection_url": "https://wiki.garza.online/collection/voice-memos-v8NzN5e0Wc",
+            "summary": summary,
+        }
+
+  - id: save-synced
+    type: tool
+    depends_on: [finalize]
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - store
+        - '{"action":"set_memory","args":{"key":"voicememo_wiki_synced","namespace":"sandcastle","value":"{steps.finalize.output.mem_csv}"}}'
+
+  - id: report
+    type: llm
+    depends_on: [finalize, save-synced]
+    prompt: |
+      Summarize this Voicenotes to Outline wiki sync for an operator. Be concise.
+      Collection URL: https://wiki.garza.online/collection/voice-memos-v8NzN5e0Wc
+      Data:
+      {steps.finalize.output}

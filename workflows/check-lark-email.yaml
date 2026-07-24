@@ -1,0 +1,254 @@
+name: check-lark-email
+description: >
+  List recent Lark inbox messages via Garza Tools MCP (mcp.garza.online)
+  using olm_mail_list / olm_mail_get. Requires TOOL_MCP_SERVER_URL +
+  TOOL_MCP_AUTH_TOKEN on the server (Garza Tools bearer).
+default_model: sonnet
+default_timeout: 300
+
+input_schema:
+  properties:
+    folder_id:
+      type: string
+      description: Lark folder id (workflow currently lists INBOX)
+      default: INBOX
+
+steps:
+  - id: list-messages
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - olm_mail_list
+        - '{"folder_id":"INBOX","page_size":10}'
+    retry:
+      max_attempts: 2
+      backoff: exponential
+
+  - id: parse-ids
+    type: code
+    depends_on: [list-messages]
+    code_config:
+      language: python
+      code: |
+        raw = _steps.get("list-messages") or {}
+        text = ""
+        err = None
+        if isinstance(raw, dict):
+            text = str(raw.get("text") or "")
+            if raw.get("isError"):
+                err = text or "mcp-bridge isError"
+        else:
+            text = str(raw)
+
+        payload = None
+        if text:
+            try:
+                payload = json.loads(text)
+            except:
+                payload = None
+
+        ids = []
+        code = None
+        msg = None
+        mailbox = None
+        has_more = False
+        if isinstance(payload, dict):
+            code = payload.get("code")
+            msg = payload.get("msg")
+            mailbox = payload.get("mailbox")
+            data = payload.get("data") or {}
+            if isinstance(data, dict):
+                items = data.get("items") or []
+                has_more = bool(data.get("has_more"))
+                if isinstance(items, list):
+                    for it in items:
+                        if isinstance(it, str):
+                            ids.append(it)
+                        elif isinstance(it, dict) and it.get("message_id"):
+                            ids.append(str(it.get("message_id")))
+
+        ok = err is None and (code in (0, "0") or (code is None and ids))
+        id0 = ids[0] if len(ids) > 0 else ""
+        id1 = ids[1] if len(ids) > 1 else ""
+        id2 = ids[2] if len(ids) > 2 else ""
+        id3 = ids[3] if len(ids) > 3 else ""
+        id4 = ids[4] if len(ids) > 4 else ""
+        result = {
+            "ok": ok,
+            "error": err,
+            "code": code,
+            "msg": msg,
+            "mailbox": mailbox,
+            "has_more": has_more,
+            "count": len(ids),
+            "ids": ids,
+            "id0": id0,
+            "id1": id1,
+            "id2": id2,
+            "id3": id3,
+            "id4": id4,
+            "source": "garza-tools-mcp/olm_mail_list",
+            "summary": (
+                ("Lark list failed: " + str(err or msg or code))
+                if not ok
+                else (
+                    "Listed " + str(len(ids)) + " Lark message id(s)."
+                    if ids
+                    else "Inbox list returned 0 messages."
+                )
+            ),
+        }
+
+  - id: get-0
+    type: tool
+    depends_on: [parse-ids]
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - olm_mail_get
+        - '{"message_id":"{steps.parse-ids.output.id0}"}'
+
+  - id: get-1
+    type: tool
+    depends_on: [parse-ids]
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - olm_mail_get
+        - '{"message_id":"{steps.parse-ids.output.id1}"}'
+
+  - id: get-2
+    type: tool
+    depends_on: [parse-ids]
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - olm_mail_get
+        - '{"message_id":"{steps.parse-ids.output.id2}"}'
+
+  - id: get-3
+    type: tool
+    depends_on: [parse-ids]
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - olm_mail_get
+        - '{"message_id":"{steps.parse-ids.output.id3}"}'
+
+  - id: get-4
+    type: tool
+    depends_on: [parse-ids]
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      arguments:
+        - olm_mail_get
+        - '{"message_id":"{steps.parse-ids.output.id4}"}'
+
+  - id: summarize
+    type: code
+    depends_on: [parse-ids, get-0, get-1, get-2, get-3, get-4]
+    code_config:
+      language: python
+      code: |
+        parsed = _steps.get("parse-ids") or {}
+        keys = ["get-0", "get-1", "get-2", "get-3", "get-4"]
+        messages = []
+        for k in keys:
+            item = _steps.get(k)
+            if item is None:
+                continue
+            text = ""
+            if isinstance(item, dict):
+                text = str(item.get("text") or "")
+                if item.get("isError"):
+                    messages.append({"error": text[:200], "step": k})
+                    continue
+            else:
+                text = str(item)
+            payload = None
+            try:
+                payload = json.loads(text) if text else None
+            except:
+                payload = None
+            if not isinstance(payload, dict):
+                if text:
+                    messages.append({"error": text[:240], "step": k})
+                continue
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                data = payload
+            msg = data.get("message") if isinstance(data, dict) else None
+            if not isinstance(msg, dict):
+                msg = data if isinstance(data, dict) else {}
+            head_from = msg.get("head_from")
+            if not isinstance(head_from, dict):
+                head_from = {}
+            labels = msg.get("label_ids")
+            if not isinstance(labels, list):
+                labels = []
+            label_s = ",".join([str(x) for x in labels[:6]])
+            messages.append({
+                "step": k,
+                "message_id": msg.get("message_id") or "",
+                "subject": msg.get("subject") or "",
+                "from_name": head_from.get("name") or "",
+                "from_address": head_from.get("mail_address") or "",
+                "internal_date": str(msg.get("internal_date") or ""),
+                "folder_id": msg.get("folder_id") or "",
+                "labels": labels,
+                "thread_id": msg.get("thread_id") or "",
+                "api_code": payload.get("code"),
+                "api_msg": payload.get("msg"),
+            })
+
+        lines = []
+        detail_ok = 0
+        for m in messages:
+            if m.get("error"):
+                lines.append("- " + str(m.get("step")) + " error: " + str(m.get("error"))[:160])
+            else:
+                detail_ok = detail_ok + 1
+                who = m.get("from_name") or m.get("from_address") or ""
+                lab = m.get("labels") or []
+                lab_s = ""
+                if lab:
+                    lab_s = " | labels=" + ",".join([str(x) for x in lab[:6]])
+                lines.append(
+                    "- [" + str(m.get("internal_date") or "") + "] "
+                    + str(m.get("subject") or "(no subject)")
+                    + " — " + str(who) + lab_s
+                )
+
+        base = str(parsed.get("summary") or "No list summary.")
+        if lines:
+            summary = base + "\n" + "\n".join(lines)
+        else:
+            summary = base + "\nNo message details fetched."
+
+        result = {
+            "source": "garza-tools-mcp",
+            "ok": bool(parsed.get("ok")),
+            "list_count": parsed.get("count") or 0,
+            "detail_count": detail_ok,
+            "has_more": parsed.get("has_more"),
+            "mailbox": parsed.get("mailbox"),
+            "messages": messages,
+            "summary": summary,
+        }
+
+  - id: report
+    type: llm
+    depends_on: [summarize]
+    prompt: |
+      Summarize this Lark mailbox check for an operator. Be concise.
+      Source is Garza Tools MCP olm_mail_* on mcp.garza.online (NOT Twenty CRM).
+      Prefer subject/from/date/labels. Call out API errors clearly.
+      Data:
+      {steps.summarize.output}

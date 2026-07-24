@@ -72,6 +72,78 @@ steps:
     assert any("must have tool_config" in e for e in errors)
 
 
+def test_tool_step_accepts_args_alias_inside_tool_config():
+    """tool_config.args is accepted as an alias of tool_config.arguments."""
+    wf = parse_yaml_string(
+        """
+name: t
+steps:
+  - id: call
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+      args:
+        - tavily_search
+        - '{"query": "sandcastle"}'
+"""
+    )
+    cfg = wf.steps[0].tool_config
+    assert cfg.tool == "mcp-bridge"
+    assert cfg.function == "call_tool"
+    assert cfg.arguments == ["tavily_search", '{"query": "sandcastle"}']
+    assert validate(wf) == []
+
+
+def test_tool_step_accepts_step_level_args_fallback():
+    """Step-level args are folded into tool_config when arguments are missing."""
+    wf = parse_yaml_string(
+        """
+name: t
+steps:
+  - id: call
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: call_tool
+    args:
+      - tavily_search
+      - '{"query": "sandcastle"}'
+"""
+    )
+    cfg = wf.steps[0].tool_config
+    assert cfg.arguments == ["tavily_search", '{"query": "sandcastle"}']
+    assert validate(wf) == []
+
+
+def test_tool_step_explicit_empty_arguments_not_overwritten_by_step_args():
+    """Explicit tool_config.arguments: [] must not be replaced by step-level args."""
+    wf = parse_yaml_string(
+        """
+name: t
+steps:
+  - id: call
+    type: tool
+    tool_config:
+      tool: mcp-bridge
+      function: list_tools
+      arguments: []
+    args:
+      - should-not-apply
+"""
+    )
+    assert wf.steps[0].tool_config.arguments == []
+    assert validate(wf) == []
+
+
+def test_mcp_bridge_registers_auth_token_credential():
+    from sandcastle.engine.tools.registry import get_tool
+
+    tool = get_tool("mcp-bridge")
+    assert "TOOL_MCP_SERVER_URL" in tool.credential_env_vars
+    assert "TOOL_MCP_AUTH_TOKEN" in tool.credential_env_vars
+
+
 # --- Execution ---
 
 
@@ -155,3 +227,16 @@ async def test_tool_step_nonzero_exit_fails():
         res = await _execute_tool_step(step, _ctx())
     assert res.status == "failed"
     assert "boom" in res.error
+
+
+def test_parse_chat_json_payload_handles_fenced_and_invalid():
+    from sandcastle.engine.generator import _parse_chat_json_payload
+
+    fenced = """```json
+{"mode": "yaml", "message": "ok", "yaml": "name: t\\nsteps: []\\n"}
+```"""
+    parsed = _parse_chat_json_payload(fenced)
+    assert parsed is not None
+    assert parsed["mode"] == "yaml"
+    assert "name: t" in parsed["yaml"]
+    assert _parse_chat_json_payload("sorry, I cannot") is None
