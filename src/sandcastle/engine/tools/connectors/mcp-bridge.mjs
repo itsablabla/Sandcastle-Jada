@@ -105,7 +105,7 @@ async function postRaw(body, { notification = false } = {}) {
     throw new Error("TOOL_MCP_SERVER_URL is not set");
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  const timer = setTimeout(() => controller.abort(), 120000);
   let resp;
   try {
     resp = await fetch(SERVER_URL, {
@@ -117,7 +117,7 @@ async function postRaw(body, { notification = false } = {}) {
   } catch (err) {
     clearTimeout(timer);
     if (err && err.name === "AbortError") {
-      throw new Error(`MCP server timeout after 30s: ${SERVER_URL}`);
+      throw new Error(`MCP server timeout after 120s: ${SERVER_URL}`);
     }
     throw err;
   }
